@@ -7,6 +7,7 @@
             [clojure.java.io :as io]
             [clojure.java.shell :as sh]
             [clojure.string :as s]
+            [clojure.set :refer [map-invert]]
             [clojure.test :as test]))
 
 (def scip-setting-keys
@@ -221,16 +222,62 @@
    (->> (map #(Integer/parseInt %)))
    (vec)))
 
+(defn partsol
+  "Write a string that the SCIP MST reader can read
+   (https://www.scipopt.org/scip/doc/html/reader__mst_8h.php), which
+   is the same format as the standard SCIP output file.
+
+   This is used for loading in partial solutions of problems for warm
+   starts using the completesol heuristic.
+
+   Files look like:
+   ```
+   x_1  1
+   x_2  2000
+   ```
+  "
+  [lp  & {:keys [var-names decimals] :or {decimals 5}}]
+  (let [lp (lp/normalize lp)
+
+        df (java.text.DecimalFormat. (str "0." (.repeat "#" decimals)))
+
+        free-vars  (into {} (filter (comp not :fixed second) (:vars lp)))
+        ;; this has to match the equivalent in io/cplex:
+        var-order  (map-indexed
+                    (if var-names
+                      (fn [i v]
+                        (let [x (str "x_" i "_"
+                                     (.replaceAll (str v) "[^A-Za-z0-9]+" "_"))]
+                          [x v]))
+                      (fn [i v] [(format "x_%d" i) v]))
+                    (keys free-vars))
+        var-rindex (into {} var-order)
+        var-index  (map-invert var-rindex)]
+    {:index-to-var var-rindex
+     :var-to-index var-index
+     :lp lp
+     :partial
+     (let [sb (StringBuffer.)]
+       (doseq [[i v] var-order
+               :let [{:keys [value]} (get (:vars lp) v)]
+               :when value
+               :let [value (.format df value)]]
+         (.append sb (format "%s %s\n" i value)))
+
+       (.toString sb))}))
+
 (defn solve* [lp {:keys [scip
                          instructions
                          presolving-emphasis
                          heuristics-emphasis
-                         emphasis]
+                         emphasis
+                         warm-start?]
                   :or   {scip                (:scip *default-solver-arguments*)
                          instructions        (:instructions *default-solver-arguments*)
                          presolving-emphasis (:presolving-emphasis *default-solver-arguments*)
                          heuristics-emphasis (:heuristics-emphasis *default-solver-arguments*)
-                         emphasis            (:emphasis *default-solver-arguments*)}
+                         emphasis            (:emphasis *default-solver-arguments*)
+                         warm-start?         false}
                   :as   settings}]
   {:pre [(or (nil? emphasis)
              (emphasis-values emphasis))
@@ -243,6 +290,10 @@
          constant-term :constant-term}
         (lpio/cplex lp)
 
+        partial-solution 
+        (when warm-start?
+          (:partial (partsol lp)))
+
         instructions
         (cond-> instructions
           presolving-emphasis
@@ -252,9 +303,14 @@
           (conj (str "set heuristics emphasis " (name heuristics-emphasis)))
 
           emphasis
-          (conj (str "set emphasis " (name emphasis))))
+          (conj (str "set emphasis " (name emphasis)))
+          
+          warm-start?
+          (conj "read partsol.mst "))
         ]
     (lpio/with-temp-dir temp
+      (when warm-start?
+        (spit (io/file temp "partsol.mst") partial-solution))
       (spit (io/file temp "problem.lp") problem-text)
       (spit (io/file temp "scip.set")
             (format-settings (dissoc settings
@@ -262,7 +318,8 @@
                                      :instructions
                                      :presolving-emphasis
                                      :heuristics-emphasis
-                                     :emphasis)))
+                                     :emphasis
+                                     :warm-start?)))
       (spit (io/file temp "commands.txt")
             (s/join
              "\n"
@@ -284,6 +341,7 @@
             stats-file  (io/file temp "statistics.txt")
             
             log (s/join "--\n" [out err])
+            _ (spit (io/file temp "log.txt") log)
 
             solution
             (cond
