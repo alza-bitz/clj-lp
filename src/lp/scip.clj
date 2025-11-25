@@ -271,12 +271,14 @@
                          presolving-emphasis
                          heuristics-emphasis
                          emphasis
+                         decimals
                          warm-start?]
                   :or   {scip                (:scip *default-solver-arguments*)
                          instructions        (:instructions *default-solver-arguments*)
                          presolving-emphasis (:presolving-emphasis *default-solver-arguments*)
                          heuristics-emphasis (:heuristics-emphasis *default-solver-arguments*)
                          emphasis            (:emphasis *default-solver-arguments*)
+                         decimals            5
                          warm-start?         false}
                   :as   settings}]
   {:pre [(or (nil? emphasis)
@@ -288,7 +290,7 @@
   
   (let [{problem-text  :program var-index :index-to-var
          constant-term :constant-term}
-        (lpio/cplex lp)
+        (lpio/cplex lp :decimals decimals)
 
         partial-solution 
         (when warm-start?
@@ -319,6 +321,7 @@
                                      :presolving-emphasis
                                      :heuristics-emphasis
                                      :emphasis
+                                     :decimals
                                      :warm-start?)))
       (spit (io/file temp "commands.txt")
             (s/join
